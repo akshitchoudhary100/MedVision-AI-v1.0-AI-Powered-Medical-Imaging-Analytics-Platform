@@ -102,6 +102,34 @@ sqlcmd -S localhost,1433 -U sa -P StrongPass@123 -d modelDB -i schema.sql
 ```
 
 ---
+## Models
+
+Due to GitHub file size limitations, the trained model files are not included in this repository.
+
+### Download Trained Models
+
+Download the following files from Google Drive:
+
+* `cnn_v1.h5`
+* `resnet50_v1.keras`
+* `efficientnet_v1.keras`
+
+Google Drive Link:
+
+https://drive.google.com/drive/folders/1rxaOzqImjFIgxf7v5FO_vUcD3vv2V9NR?usp=sharing
+
+### Setup
+
+After downloading, place the files inside the `model/` directory:
+
+```text
+model/
+├── cnn_v1.h5
+├── resnet50_v1.keras
+└── efficientnet_v1.keras
+```
+
+The application expects these files to be present before running predictions.
 
 ## Running the Application
 
