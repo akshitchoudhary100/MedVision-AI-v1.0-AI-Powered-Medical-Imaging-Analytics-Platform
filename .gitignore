@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+chest-xray-pneumonia.zip
+
+model/*.h5
+model/*.keras
+
+.ipynb_checkpoints/
+*.log
+
