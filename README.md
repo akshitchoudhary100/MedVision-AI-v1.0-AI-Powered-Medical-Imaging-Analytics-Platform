@@ -1,175 +1,249 @@
-# 🫁 PneumoScan — Clinical AI Platform
+# 🫁 Pneumonia Detection System
+### Deep Learning · FastAPI · SQL Server · Streamlit
 
-End-to-end pneumonia detection system. CNN classifies chest X-rays → FastAPI serves predictions → SQL Data Warehouse stores every result → Streamlit dashboard shows real-time analytics.
-
-![Python](https://img.shields.io/badge/Python-3.10+-blue)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0-orange)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.110-green)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.32-red)
+A production-ready chest X-ray classification pipeline that runs three trained deep learning models (CNN, ResNet50, EfficientNetB0) through a REST API, persists every prediction into a SQL Server data warehouse, and surfaces live analytics through a Streamlit dashboard — all in a single-command workflow.
 
 ---
 
-## 🏗️ Architecture
+## Why This Exists
 
-```
-User uploads X-ray
-       ↓
-  Streamlit UI  ──────────────────────────────┐
-       ↓                                      │
-  FastAPI /predict                            │
-       ↓                                      │
-  CNN Model (ResNet18)                        │
-  + Grad-CAM heatmap                          │
-       ↓                                      │
-  SQLite Warehouse  ←── Medallion Architecture│
-  (Bronze → Silver → Gold)                    │
-       ↓                                      │
-  /analytics endpoint ────────────────────────┘
-       ↓
-  Streamlit Dashboard (trends, KPIs, history)
-```
+Pneumonia kills over **2.5 million people a year** — and misdiagnosis or delayed diagnosis is one of the leading reasons. Radiologists in under-resourced hospitals often review hundreds of X-rays per shift. This tool is built to be a **second opinion at scale**: fast, auditable, and explainable.
 
 ---
 
-## 📁 Structure
+## Architecture
 
 ```
-pneumonia-platform/
-├── backend/
-│   └── main.py              ← FastAPI server (predict + analytics)
-├── frontend/
-│   └── app.py               ← Streamlit UI (3 pages)
-├── warehouse/
-│   └── schema.sql           ← SQL schema (Bronze/Silver/Gold layers)
-├── model/
-│   └── pneumonia_cnn.pth    ← Your trained model (place here)
-├── requirements.txt
-└── README.md
+[Chest X-Ray Image]
+        │
+        ▼
+  ┌─────────────┐        POST /predict
+  │  Streamlit  │ ──────────────────────► ┌───────────────────┐
+  │  Frontend   │                         │  FastAPI Backend  │
+  │  (app.py)   │ ◄──────────────────────  │   (main.py)       │
+  └─────────────┘     JSON Response       └────────┬──────────┘
+                                                   │
+                                       ┌───────────▼──────────┐
+                                       │  Model Inference      │
+                                       │  CNN / ResNet50 /     │
+                                       │  EfficientNetB0       │
+                                       └───────────┬──────────┘
+                                                   │
+                                       ┌───────────▼──────────┐
+                                       │  SQL Server Warehouse │
+                                       │  Bronze → Silver →    │
+                                       │  Gold (Views)         │
+                                       └──────────────────────┘
 ```
 
 ---
 
-## 🚀 Setup — Run in 5 Minutes
+## Features
 
-### Step 1 — Install dependencies
+- **3 model choices** — CNN (fast), ResNet50 (balanced), EfficientNetB0 (accurate)
+- **Model-specific preprocessing** — each model gets the preprocessing it was trained with
+- **Medallion data warehouse** — Bronze (raw), Silver (cleaned), Gold (analytical views)
+- **Real-time analytics** — total scans, pneumonia rate, average confidence, latency
+- **Full prediction history** — every inference stored with timestamp, confidence, image size
+- **Swagger docs** — auto-generated at `/docs`
+- **CORS-enabled** — ready to connect any frontend or external service
+
+---
+
+## Project Structure
+
+```
+pneumonia-detection/
+│
+├── main.py              # FastAPI backend — inference + DB + REST endpoints
+├── app.py               # Streamlit frontend — upload, predict, dashboard
+├── schema.sql           # SQL Server DDL — tables + 4 analytical views
+│
+└── model/
+    ├── cnn_v1.h5
+    ├── resnet50_v1.keras
+    └── efficientnet_v1.keras
+```
+
+---
+
+## Prerequisites
+
+| Requirement         | Version       |
+|---------------------|---------------|
+| Python              | 3.9+          |
+| SQL Server          | 2019+         |
+| ODBC Driver         | 17            |
+| TensorFlow          | 2.x           |
+
+---
+
+## Installation
 
 ```bash
-git clone https://github.com/akshitchoudhary100/pneumonia-platform
-cd pneumonia-platform
-pip install -r requirements.txt
+# 1. Clone the repo
+git clone https://github.com/yourusername/pneumonia-detection.git
+cd pneumonia-detection
+
+# 2. Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+
+# 3. Install dependencies
+pip install fastapi uvicorn tensorflow pillow numpy pyodbc streamlit requests
+
+# 4. Set up the database — connect to SQL Server and run:
+sqlcmd -S localhost,1433 -U sa -P StrongPass@123 -d modelDB -i schema.sql
+
+# 5. Place your trained models in the model/ directory
+#    model/cnn_v1.h5
+#    model/resnet50_v1.keras
+#    model/efficientnet_v1.keras
 ```
 
-### Step 2 — Add your trained model
+---
 
-Place your trained model file in `model/pneumonia_cnn.pth`
+## Running the Application
 
-If your model uses a different architecture, edit `PneumoniaCNN` class in `backend/main.py`.
+Open **two terminals**:
 
-### Step 3 — Connect to your existing warehouse (optional)
+```bash
+# Terminal 1 — Start the FastAPI backend
+uvicorn main:app --reload --port 8000
 
-If you want to use your existing SQL Server warehouse instead of SQLite:
+# Terminal 2 — Start the Streamlit frontend
+streamlit run app.py
+```
 
-1. Open `backend/main.py`
-2. Replace the SQLite connection with your SQL Server connection string:
+Then open your browser:
+
+| Service         | URL                          |
+|-----------------|------------------------------|
+| Streamlit UI    | http://localhost:8501        |
+| FastAPI Swagger | http://localhost:8000/docs   |
+| Health Check    | http://localhost:8000/health |
+
+---
+
+## API Reference
+
+### `POST /predict`
+Upload a chest X-ray and receive a classification.
+
+**Form fields:**
+| Field        | Type   | Default | Options                           |
+|--------------|--------|---------|-----------------------------------|
+| `file`       | File   | —       | JPG, PNG                          |
+| `model_name` | string | `cnn`   | `cnn`, `resnet50`, `efficientnet` |
+
+**Response:**
+```json
+{
+  "prediction_id": "3f2e1a...",
+  "prediction":    "PNEUMONIA",
+  "confidence":    94.27,
+  "processing_ms": 312.5
+}
+```
+
+---
+
+### `GET /analytics`
+Aggregate stats across all predictions.
+
+```json
+{
+  "total_scans":     1024,
+  "total_pneumonia": 612,
+  "total_normal":    412,
+  "avg_confidence":  89.4,
+  "avg_latency_ms":  287.0
+}
+```
+
+---
+
+### `GET /history?limit=20`
+Last N predictions, newest first.
+
+---
+
+### `GET /health`
+Returns API status and available models.
+
+---
+
+## Database Schema
+
+### `fact_predictions` (Silver Layer)
+| Column           | Type          | Description                  |
+|------------------|---------------|------------------------------|
+| `prediction_id`  | NVARCHAR(36)  | UUID primary key             |
+| `timestamp`      | DATETIME2     | Auto-set on insert           |
+| `result`         | NVARCHAR(20)  | `PNEUMONIA` or `NORMAL`      |
+| `confidence_pct` | DECIMAL(5,2)  | 0.00 – 100.00                |
+| `processing_ms`  | INT           | End-to-end inference time    |
+| `image_size_kb`  | FLOAT         | Uploaded image size          |
+| `model_version`  | NVARCHAR(20)  | Model identifier             |
+
+### Gold Layer Views
+
+| View                          | Purpose                                 |
+|-------------------------------|-----------------------------------------|
+| `vw_daily_stats`              | Per-day scan counts, rates, latency     |
+| `vw_summary`                  | All-time aggregate KPIs                 |
+| `vw_weekly_trend`             | Week-over-week volume and confidence    |
+| `vw_confidence_distribution`  | Bucketed confidence by result class     |
+
+---
+
+## Model Details
+
+| Model          | Architecture     | Input Size | Notes                              |
+|----------------|------------------|------------|------------------------------------|
+| `cnn`          | Custom CNN       | 224×224    | Fastest; good for quick screening  |
+| `resnet50`     | ResNet-50        | 224×224    | Balanced accuracy / speed          |
+| `efficientnet` | EfficientNet-B0  | 224×224    | Highest accuracy; recommended      |
+
+Each model uses its own preprocessing pipeline. EfficientNet and ResNet50 use their Keras application-specific normalisation. The custom CNN uses simple `/255` scaling.
+
+---
+
+## Configuration
+
+To change the database connection, edit `CONN_STR` in `main.py`:
+
 ```python
-# Replace:
-conn = sqlite3.connect(DB_PATH)
-
-# With your warehouse connection:
-import pyodbc
-conn = pyodbc.connect("Driver={SQL Server};Server=YOUR_SERVER;Database=YOUR_DB;...")
-```
-3. Run `warehouse/schema.sql` against your existing warehouse DB
-
-### Step 4 — Start the API
-
-```bash
-uvicorn backend.main:app --reload --port 8000
+CONN_STR = (
+    "DRIVER={ODBC Driver 17 for SQL Server};"
+    "SERVER=localhost,1433;"
+    "DATABASE=modelDB;"
+    "UID=sa;"
+    "PWD=YourPasswordHere;"
+    "TrustServerCertificate=yes;"
+)
 ```
 
-API docs auto-generated at: http://localhost:8000/docs
+To point the Streamlit app at a remote API, edit `API_URL` in `app.py`:
 
-### Step 5 — Start the frontend
-
-```bash
-streamlit run frontend/app.py
-```
-
-Opens at: http://localhost:8501
-
----
-
-## 🌡️ Features
-
-### Diagnosis Page
-- Upload chest X-ray (JPG/PNG)
-- CNN predicts: **PNEUMONIA** or **NORMAL**
-- Confidence score (0-100%)
-- **Grad-CAM heatmap** showing exactly which region triggered the prediction
-- Every prediction auto-saved to warehouse
-
-### Analytics Dashboard
-- Total scans, pneumonia rate, average confidence
-- 14-day daily trend chart
-- Result distribution donut chart
-- Confidence over time bar chart
-
-### History Page
-- Full prediction history from warehouse
-- Sortable, filterable table
-- All data queryable via SQL
-
----
-
-## 🗄️ Warehouse Design (Medallion Architecture)
-
-Extends the existing data warehouse project with a new domain:
-
-```
-Bronze: bronze_predictions_raw    ← raw API responses, no transformation
-Silver: fact_predictions          ← cleaned, typed, validated predictions
-Gold:   vw_daily_stats            ← daily aggregations for dashboard
-        vw_summary                ← overall KPIs
-        vw_weekly_trend           ← weekly patterns
-        vw_confidence_distribution ← model calibration analysis
+```python
+API_URL = "http://your-server-ip:8000"
 ```
 
 ---
 
-## 📊 Model Performance
+## Dataset
 
-| Metric | Score |
-|--------|-------|
-| Validation Accuracy | >90% |
-| Architecture | ResNet18 (transfer learning) |
-| Dataset | Chest X-Ray Images (Kaggle) |
-| Training | PyTorch, Adam, BCELoss |
+Models were trained on the [Chest X-Ray Images (Pneumonia)](https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia) dataset from Kaggle — 5,863 JPEG images across NORMAL and PNEUMONIA classes, sourced from Guangzhou Women and Children's Medical Center.
 
 ---
 
-## 🔌 API Endpoints
+## License
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/predict` | POST | Upload X-ray → get prediction + Grad-CAM |
-| `/analytics` | GET | Warehouse analytics for dashboard |
-| `/history` | GET | Recent predictions |
-| `/health` | GET | API status check |
+MIT License — free to use, modify, and distribute.
 
 ---
 
-## 💡 Resume Bullets
+## Disclaimer
 
-```
-• Built end-to-end clinical AI platform: CNN → FastAPI → SQL Warehouse → Streamlit
-• Implemented Grad-CAM visualisation for model interpretability in medical imaging
-• Extended Medallion Architecture data warehouse (Bronze/Silver/Gold) with prediction analytics
-• Real-time dashboard showing population-level pneumonia trends across all predictions
-• Tech: PyTorch, FastAPI, SQLite, Streamlit, Plotly, Grad-CAM, Docker
-```
-
----
-
-## ⚕️ Disclaimer
-
-This tool is for educational and portfolio purposes only. Not intended for clinical diagnosis. Always consult a qualified radiologist.
+This tool is built for **research and educational purposes**. It is not a certified medical device and must not replace professional clinical diagnosis. Always consult a qualified radiologist for medical decisions.
