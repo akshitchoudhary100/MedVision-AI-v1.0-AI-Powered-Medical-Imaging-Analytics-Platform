@@ -5,9 +5,11 @@ __pycache__/
 
 chest-xray-pneumonia.zip
 
-model/*.h5
+
 model/*.keras
 
 .ipynb_checkpoints/
 *.log
 
+# Mac
+.DS_Store
