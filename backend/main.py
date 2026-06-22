@@ -1,6 +1,6 @@
 """
 🫁 Pneumonia Detection API — FastAPI
-EfficientNetB0 / ResNet50 / CNN  +  SQL Server  +  Streamlit Backend
+CNN / ResNet50 / EfficientNetB0  +  SQL Server Warehouse  +  Streamlit Frontend
 """
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -45,16 +45,16 @@ IMAGE_SIZE = 224
 CLASS_NAMES = ["NORMAL", "PNEUMONIA"]
 
 MODEL_PATHS = {
-    "cnn":          "model/cnn_v1.h5",
+    "cnn":          "model/cnn_v1.keras",
     "resnet50":     "model/resnet50_v1.keras",
     "efficientnet": "model/efficientnet_v1.keras",
 }
 
-# Models that need their own preprocessing (not generic /255 scaling)
+# Each model gets the preprocessing it was trained with.
+# CNN falls through to simple /255 scaling handled in preprocess_image().
 PREPROCESS_MAP = {
     "efficientnet": efficientnet_preprocess,
     "resnet50":     resnet_preprocess,
-    # "cnn" uses simple /255 normalization — handled below
 }
 
 loaded_models: dict = {}
@@ -70,12 +70,12 @@ CONN_STR = (
 
 
 # ============================================================
-# DATABASE HELPERS
+# DATABASE
 # ============================================================
 
 @contextmanager
 def get_db():
-    """Yield a pyodbc connection; commit on success, rollback on error."""
+    """Yield a committed pyodbc connection; rollback on any error."""
     conn = pyodbc.connect(CONN_STR)
     try:
         yield conn
@@ -88,10 +88,17 @@ def get_db():
 
 
 def init_warehouse():
-    """Create fact_predictions table if it doesn't exist."""
+    """
+    Create fact_predictions on first run.
+    Also adds model_name column if upgrading from the old schema
+    (the column didn't exist in earlier versions of this project).
+    """
     try:
         with get_db() as conn:
-            conn.cursor().execute("""
+            cur = conn.cursor()
+
+            # Create table if it doesn't exist yet
+            cur.execute("""
                 IF NOT EXISTS (
                     SELECT * FROM sysobjects
                     WHERE name = 'fact_predictions' AND xtype = 'U'
@@ -99,6 +106,7 @@ def init_warehouse():
                 CREATE TABLE fact_predictions (
                     prediction_id   NVARCHAR(36)    PRIMARY KEY,
                     timestamp       DATETIME2       NOT NULL DEFAULT GETDATE(),
+                    model_name      NVARCHAR(30)    NOT NULL DEFAULT 'cnn',
                     result          NVARCHAR(20)    NOT NULL
                                     CHECK (result IN ('PNEUMONIA', 'NORMAL')),
                     confidence_pct  DECIMAL(5,2)    NOT NULL
@@ -108,36 +116,53 @@ def init_warehouse():
                     model_version   NVARCHAR(20)    DEFAULT 'v1.0'
                 )
             """)
+
+            # Migration: add model_name to tables created by the old schema
+            cur.execute("""
+                IF NOT EXISTS (
+                    SELECT * FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_NAME = 'fact_predictions'
+                    AND COLUMN_NAME = 'model_name'
+                )
+                ALTER TABLE fact_predictions
+                ADD model_name NVARCHAR(30) NOT NULL DEFAULT 'cnn'
+            """)
+
         print("✅ SQL Server connected — warehouse ready")
     except Exception as e:
         print(f"❌ Database init error: {e}")
 
 
-def store_prediction(pid: str, result: str, confidence: float,
-                     ms: float, image_size_kb: float = None,
-                     model_version: str = "v1.0"):
-    """Insert one prediction row into fact_predictions."""
+def store_prediction(
+    pid: str,
+    model_name: str,
+    result: str,
+    confidence: float,
+    ms: float,
+    image_size_kb: float = None,
+):
+    """Persist one prediction row. confidence is 0-1 float; stored as 0-100."""
     try:
         with get_db() as conn:
             conn.cursor().execute("""
                 INSERT INTO fact_predictions
-                    (prediction_id, result, confidence_pct,
-                     processing_ms, image_size_kb, model_version)
+                    (prediction_id, model_name, result,
+                     confidence_pct, processing_ms, image_size_kb)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 pid,
+                model_name,
                 result,
                 round(confidence * 100, 2),
                 int(ms),
                 round(image_size_kb, 2) if image_size_kb else None,
-                model_version,
             ))
     except Exception as e:
         print(f"❌ Insert error: {e}")
 
 
 def get_analytics() -> dict:
-    """Return aggregate stats from fact_predictions."""
+    """Overall aggregate stats — used by /analytics and the Streamlit dashboard."""
     try:
         with get_db() as conn:
             c = conn.cursor()
@@ -166,19 +191,54 @@ def get_analytics() -> dict:
         }
 
 
+def get_model_stats() -> list:
+    """Per-model breakdown — powers the /model-stats endpoint."""
+    try:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT
+                    model_name,
+                    COUNT(*)                                                    AS total_scans,
+                    ROUND(AVG(CAST(confidence_pct AS FLOAT)), 2)               AS avg_confidence,
+                    ROUND(AVG(CAST(processing_ms  AS FLOAT)), 0)               AS avg_latency_ms,
+                    SUM(CASE WHEN result = 'PNEUMONIA' THEN 1 ELSE 0 END)      AS pneumonia_cases,
+                    SUM(CASE WHEN result = 'NORMAL'    THEN 1 ELSE 0 END)      AS normal_cases
+                FROM fact_predictions
+                GROUP BY model_name
+                ORDER BY total_scans DESC
+            """)
+            rows = c.fetchall()
+            return [
+                {
+                    "model_name":      r[0],
+                    "total_scans":     r[1],
+                    "avg_confidence":  float(r[2] or 0),
+                    "avg_latency_ms":  float(r[3] or 0),
+                    "pneumonia_cases": r[4],
+                    "normal_cases":    r[5],
+                }
+                for r in rows
+            ]
+    except Exception as e:
+        print(f"❌ Model stats error: {e}")
+        return []
+
+
 # ============================================================
 # MODEL HELPERS
 # ============================================================
 
 def get_model(model_name: str):
-    """Load model from disk on first call, then cache in memory."""
+    """Load once from disk, then serve from memory cache."""
     if model_name in loaded_models:
         return loaded_models[model_name]
 
     path = MODEL_PATHS.get(model_name)
     if not path:
-        raise ValueError(f"Unknown model '{model_name}'. "
-                         f"Valid options: {list(MODEL_PATHS.keys())}")
+        raise ValueError(
+            f"Unknown model '{model_name}'. Valid options: {list(MODEL_PATHS.keys())}"
+        )
 
     model = keras.models.load_model(path)
     loaded_models[model_name] = model
@@ -187,7 +247,11 @@ def get_model(model_name: str):
 
 
 def preprocess_image(pil_image: Image.Image, model_name: str) -> np.ndarray:
-    """Resize, apply model-specific preprocessing, and add batch dim."""
+    """
+    Resize to 224×224 and apply the preprocessing each architecture expects.
+    EfficientNet and ResNet50 have their own Keras preprocess_input functions.
+    The custom CNN was trained with simple /255 normalisation — no extra steps.
+    """
     img = pil_image.resize((IMAGE_SIZE, IMAGE_SIZE))
     arr = np.array(img).astype(np.float32)
 
@@ -195,7 +259,6 @@ def preprocess_image(pil_image: Image.Image, model_name: str) -> np.ndarray:
     if preprocess_fn:
         arr = preprocess_fn(arr)
     else:
-        # Simple CNN — scale pixels to [0, 1]
         arr = arr / 255.0
 
     return np.expand_dims(arr, axis=0)
@@ -240,7 +303,7 @@ async def predict(
 
     start = time.time()
 
-    # ── Read & validate image ─────────────────────────────────
+    # ── Read & decode image ───────────────────────────────────
     try:
         contents = await file.read()
         pil_image = Image.open(io.BytesIO(contents)).convert("RGB")
@@ -249,10 +312,8 @@ async def predict(
 
     image_size_kb = len(contents) / 1024
 
-    # ── Preprocess ───────────────────────────────────────────
+    # ── Preprocess & infer ────────────────────────────────────
     img_array = preprocess_image(pil_image, model_name)
-
-    # ── Inference ────────────────────────────────────────────
     prob = float(model.predict(img_array, verbose=0)[0][0])
 
     prediction = "PNEUMONIA" if prob >= 0.5 else "NORMAL"
@@ -261,18 +322,19 @@ async def predict(
     elapsed_ms = (time.time() - start) * 1000
     pid = str(uuid.uuid4())
 
-    # ── Persist ──────────────────────────────────────────────
+    # ── Persist ───────────────────────────────────────────────
     store_prediction(
         pid=pid,
+        model_name=model_name,        # ← now correctly stored per prediction
         result=prediction,
         confidence=confidence,
         ms=elapsed_ms,
         image_size_kb=image_size_kb,
-        model_version="v1.0",
     )
 
     return {
         "prediction_id": pid,
+        "model_used":    model_name,
         "prediction":    prediction,
         "confidence":    round(confidence * 100, 2),
         "processing_ms": round(elapsed_ms, 2),
@@ -284,6 +346,12 @@ def analytics():
     return get_analytics()
 
 
+@app.get("/model-stats")
+def model_stats():
+    """Per-model breakdown: scans, avg confidence, avg latency, case split."""
+    return get_model_stats()
+
+
 @app.get("/history")
 def history(limit: int = 20):
     try:
@@ -293,6 +361,7 @@ def history(limit: int = 20):
                 SELECT TOP {min(limit, 100)}
                     prediction_id,
                     timestamp,
+                    model_name,
                     result,
                     confidence_pct,
                     processing_ms,
@@ -303,12 +372,13 @@ def history(limit: int = 20):
             rows = c.fetchall()
             return [
                 {
-                    "prediction_id": r[0],
-                    "timestamp":     str(r[1]),
-                    "result":        r[2],
-                    "confidence_pct": float(r[3]),
-                    "processing_ms": r[4],
-                    "image_size_kb": float(r[5]) if r[5] else None,
+                    "prediction_id":  r[0],
+                    "timestamp":      str(r[1]),
+                    "model_name":     r[2],
+                    "result":         r[3],
+                    "confidence_pct": float(r[4]),
+                    "processing_ms":  r[5],
+                    "image_size_kb":  float(r[6]) if r[6] else None,
                 }
                 for r in rows
             ]
