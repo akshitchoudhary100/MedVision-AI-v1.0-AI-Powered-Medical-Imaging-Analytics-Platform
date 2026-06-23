@@ -45,7 +45,7 @@ IMAGE_SIZE = 224
 CLASS_NAMES = ["NORMAL", "PNEUMONIA"]
 
 MODEL_PATHS = {
-    "cnn":          "model/cnn_v1.keras",
+    "cnn":          "model/cnn_v2.keras",
     "resnet50":     "model/resnet50_v1.keras",
     "efficientnet": "model/efficientnet_v1.keras",
 }
